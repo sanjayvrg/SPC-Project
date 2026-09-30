@@ -1,24 +1,43 @@
 import requests
+import time
+import json
 import statistics
 from datetime import datetime, timezone
 
 patch_dates = [
-    "2024-02-08",  # launch
-    "2024-02-14",
-    "2024-02-22",
-    "2024-03-06",
-    "2024-03-20",
-    "2024-04-02",
-    "2024-04-29",  # major balance patch, well known nerf controversy
-    "2024-05-14",
-    "2024-06-13",
-    "2024-07-04",
-    "2024-08-06",
-    "2024-08-20",  # start of "60-day plan"
-    "2024-09-17",
-    "2024-10-15",
-    "2024-11-05",
-    "2024-12-13",
+    "2025-06-12",
+    "2025-06-17",
+    "2025-06-24",
+    "2025-07-15",
+    "2025-07-17",
+    "2025-08-05",
+    "2025-08-26",
+    "2025-08-29",
+    "2025-09-02",
+    "2025-09-04",
+    "2025-09-16",
+    "2025-10-23",
+    "2025-11-04",
+    "2025-11-18",
+    "2025-12-02",
+    "2025-12-04",
+    "2026-01-22",
+    "2026-02-03",
+    "2026-02-10",
+    "2026-03-17",
+    "2026-03-25",
+    "2026-04-14",
+    "2026-04-28",
+    "2026-05-06",
+    "2026-05-19",
+    "2026-05-29",
+    "2026-06-09",
+    "2026-06-16",
+    "2026-07-07",
+    "2026-08-12",
+    "2026-08-17",
+    "2026-08-25",
+    "2026-09-22",
 ]
 
 def date_to_unix(date_string):
@@ -33,7 +52,7 @@ def get_reviews_page(cursor):
         "filter": "recent",
         "language": "english",
         "num_per_page": 100,
-        "cursor": cursor  # fixed: use the actual param, not hardcoded "*"
+        "cursor": cursor
     }
     response = requests.get(url, params=params)
     if response.status_code == 200:
@@ -42,15 +61,24 @@ def get_reviews_page(cursor):
         print(f"request failed: {response.status_code}")
         return None
 
-def get_all_reviews(max_pages=5):
+def get_reviews_until(cutoff_unix, max_pages=1500):
     cursor = "*"
     all_reviews = []
     pages_pulled = 0
+    wait_time = 5
 
     while True:
         data = get_reviews_page(cursor)
-        reviews = data["reviews"]
 
+        if data is None:
+            print(f"request failed, waiting {wait_time} seconds before retrying...")
+            time.sleep(wait_time)
+            wait_time = min(wait_time * 2, 120)
+            continue
+
+        wait_time = 5
+
+        reviews = data["reviews"]
         if not reviews:
             break
 
@@ -58,8 +86,22 @@ def get_all_reviews(max_pages=5):
         cursor = data["cursor"]
         pages_pulled += 1
 
-        if pages_pulled >= max_pages:
+        oldest_in_page = min(r["timestamp_created"] for r in reviews)
+
+        if oldest_in_page < cutoff_unix:
+            print(f"reached cutoff after {pages_pulled} pages")
             break
+
+        if pages_pulled >= max_pages:
+            print("hit max_pages safety limit before reaching cut off")
+            break
+
+        if pages_pulled % 50 == 0:
+            print(f"... {pages_pulled} pages pulled so far, oldest so far: {oldest_in_page}")
+            with open("reviews_checkpoint.json", "w") as f:
+                json.dump(all_reviews, f)
+
+        time.sleep(1)
 
     return all_reviews
 
@@ -80,27 +122,42 @@ def compute_defect_rates(all_reviews, patch_dates_unix):
 
     return defect_rates
 
-
 def iterative_3sigma(data):
     if len(data) < 2:
         print("not enough data points to run 3-sigma analysis")
         return None
-    
-    mean = statistics.mean(data)
-    std_dev = statistics.stdev(data)
-    ucl = mean + 3 * std_dev
-    lcl = mean - 3 * std_dev
-    print(f"mean: {mean}, ucl: {ucl}, lcl: {lcl}")
 
+    data = data.copy()
+
+    while True:
+        mean = statistics.mean(data)
+        std_dev = statistics.stdev(data)
+        ucl = mean + 3 * std_dev
+        lcl = mean - 3 * std_dev
+        print(f"mean: {mean}, ucl: {ucl}, lcl: {lcl}")
+
+        outliers = [x for x in data if x > ucl or x < lcl]
+
+        if not outliers:
+            break
+
+        data = [x for x in data if x <= ucl and x >= lcl]
+
+    return data, ucl, lcl
 
 
 if __name__ == "__main__":
-    reviews = get_all_reviews(max_pages = 20)
+    with open("reviews_checkpoint.json", "r") as f:
+        reviews = json.load(f)
 
-    fake_dates = ["2026-09-20", "2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24"]
-    fake_dates_unix = [date_to_unix(d) for d in fake_dates]
+    print(f"loaded {len(reviews)} reviews from checkpoint")
+    print(f"oldest review timestamp: {min(r['timestamp_created'] for r in reviews)}")
 
-    rates = compute_defect_rates(reviews, fake_dates_unix)
+    patch_dates_unix = [date_to_unix(d) for d in patch_dates]
+    rates = compute_defect_rates(reviews, patch_dates_unix)
     print(rates)
 
-    iterative_3sigma(rates)
+    result = iterative_3sigma(rates)
+    if result:
+        baseline, ucl, lcl = result
+        print(f"baseline: {baseline}, ucl: {ucl}, lcl: {lcl}")
